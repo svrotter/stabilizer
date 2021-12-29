@@ -254,6 +254,18 @@ impl FrameGenerator {
                 .unwrap();
         }
     }
+
+    pub fn flush (&mut self)
+    {
+        if self.current_frame.is_none() {
+            return;
+        }
+        else{
+            let frame = self.current_frame.take().unwrap();
+            self.pool.free(frame.buffer);
+        }
+        self.sequence_number = 0;
+    }
 }
 
 /// The "consumer" portion of the data stream.

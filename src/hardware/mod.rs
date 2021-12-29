@@ -10,6 +10,7 @@ pub mod input_stamper;
 pub mod pounder;
 pub mod setup;
 pub mod signal_generator;
+pub mod signal_generator_sr;
 pub mod system_timer;
 
 mod eeprom;
