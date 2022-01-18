@@ -10,12 +10,14 @@ pub use miniconf;
 pub use serde;
 
 pub mod data_stream;
+pub mod udp_messages;
 pub mod network_processor;
 pub mod shared;
 pub mod telemetry;
 
 use crate::hardware::{system_timer::SystemTimer, EthernetPhy, NetworkStack};
 use data_stream::{DataStream, FrameGenerator};
+use udp_messages::{MessageHandler, MsgFrameGenerator};
 use minimq::embedded_nal::IpAddr;
 use network_processor::NetworkProcessor;
 use shared::NetworkManager;
@@ -49,7 +51,9 @@ pub struct NetworkUsers<S: Default + Miniconf, T: Serialize> {
     pub miniconf: miniconf::MqttClient<S, NetworkReference, SystemTimer, 512>,
     pub processor: NetworkProcessor,
     stream: DataStream,
+    msg_handler: MessageHandler,
     generator: Option<FrameGenerator>,
+    msg_generator: Option<MsgFrameGenerator>,
     pub telemetry: TelemetryClient<T>,
 }
 
@@ -101,15 +105,21 @@ where
             broker,
         );
 
+        let (msg_generator, msg_handler) =
+            udp_messages::setup_handler(stack_manager.acquire_stack());
         let (generator, stream) =
             data_stream::setup_streaming(stack_manager.acquire_stack());
+
+
 
         NetworkUsers {
             miniconf: settings,
             processor,
             telemetry,
             stream,
+            msg_handler,
             generator: Some(generator),
+            msg_generator: Some(msg_generator),
         }
     }
 
@@ -137,6 +147,29 @@ where
         }
     }
 
+    /// Enable UDP message service.
+    ///
+    /// # Args
+    /// * `format` - A unique u8 code indicating the format of the data.
+    pub fn configure_messaging(
+        &mut self,
+        format: impl Into<u8>,
+    ) -> MsgFrameGenerator {
+        let mut msg_generator = self.msg_generator.take().unwrap();
+        msg_generator.configure(format);
+        msg_generator
+    }
+
+    /// Set destination for message service to the provided remote target.
+    ///
+    /// # Args
+    /// * `remote` - The destination for the streamed data.
+    pub fn set_msg_destination(&mut self, remote: SocketAddr) {
+        if self.msg_generator.is_none() {
+            self.msg_handler.set_remote(remote);
+        }
+    }
+
     /// Update and process all of the network users state.
     ///
     /// # Returns
@@ -148,6 +181,11 @@ where
         // Update the data stream.
         if self.generator.is_none() {
             self.stream.process();
+        }
+
+        // Handle UDP messages.
+        if self.msg_generator.is_none() {
+            self.msg_handler.process();
         }
 
         // Poll for incoming data.

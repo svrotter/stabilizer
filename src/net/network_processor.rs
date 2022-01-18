@@ -50,7 +50,8 @@ impl NetworkProcessor {
             (false, false) => {
                 log::warn!("Network link DOWN");
                 self.network_was_reset = true;
-                self.stack.lock(|stack| stack.handle_link_reset());
+                // SCR bug in NAL. IP gets removed even when there is no DHCP socket
+                //self.stack.lock(|stack| stack.handle_link_reset());
             }
             _ => {}
         };

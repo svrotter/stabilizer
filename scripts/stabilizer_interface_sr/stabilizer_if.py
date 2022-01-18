@@ -33,9 +33,15 @@ class stabilizerClass:
 
     # The magic header half-word at the start of each packet.
     MAGIC_WORD = 0x057B
+    MSG_MAGIC_WORD = 0x057C
+
 
     # The struct format of the header.
-    HEADER_FORMAT = '<HBBI'
+    HEADER_FORMAT = '<HBBL'
+    
+    # The struct format of the header.
+    #https://docs.python.org/3/library/array.html
+    MSG_HEADER_FORMAT = '<HBHL'
 
     # All supported formats by this reception script. The items in this dict 
     # are functions that return the struct deserialization code to unpack 
@@ -63,13 +69,16 @@ class stabilizerClass:
     
     BASIC_SETTINGS = {
         'ms_control': {0: ['sampling_freq', 1/(10e-9*208)],
-                      1: ['port', 9933],
+                      1: ['stream_port', 9933],
                       2: ['frame_size', 1032],
-                      3: ['batch_size', 8],
-                      4: ['committing', True],
-                      5: ['stream_requesting', True],
-                      6: ['stream_format', 0],
-                      7: ['stream_channels', 4],
+                      3: ['frame_payload', 1024],
+                      4: ['batch_size', 8],
+                      5: ['committing', True],
+                      6: ['stream_requesting', True],
+                      7: ['stream_format', 0],
+                      8: ['stream_channels', 4],
+                      9: ['msg_port', 9934],
+                     10: ['msg_size', 521],
         }
     }
     
@@ -80,11 +89,12 @@ class stabilizerClass:
         ['mac','str'],
         ['app_mode','str'],
         ['sampling_freq','float'],
+        ['batch_size','int'],
         ['gain_afe0','str'],
         ['gain_afe1','str'],
-        ['stream_batch_request','int'],
-        ['received_batch_count','int'],
-        ['received_frame_count','int'],
+        ['stream_batch_request','int'], 
+        ['received_batch_count','int'], 
+        ['received_frame_count','int'], 
         ['lut_config0_amplitude','float'],
         ['lut_config0_phase_offset_deg','float'],
         ['lut_config1_amplitude','float'],
@@ -117,6 +127,8 @@ class stabilizerClass:
     #    auto -> execute automated update on remote device
     #    obj -> needs to be set if attribute is an object. 
     #           The attributes of the object can't have auto tag
+    #    sha -> "shadow" attributes, that are changed in run_conf but not
+    #           mentioned directly
     # data types:
     #   num: number
     #   str: string (or enum on stabilizer)
@@ -148,9 +160,13 @@ class stabilizerClass:
         ['sig_ctrl_amplitude','cfg-auto_num','signal_generator_ctrl/amplitude='],
         ['sig_ctrl_offset','cfg-auto_num','signal_generator_ctrl/offset='],
         ['sig_ctrl_stream_trigger','cfg-auto_str','stream_trigger='],
-        ['stream_target','auto_tar','stream_target='],
+        ['stream_port','auto_tar','stream_target='],
+        ['msg_port','auto_tar','msg_target='],
         ['stream_mode','auto_str','stream_mode='],
-        ['stream_batch_request','cfg-auto_num','stream_batch_request='],  
+        ['stream_request_length','cfg_num',''],
+        ['stream_request_unit','cfg_str',''],
+        ['stream_request','cfg_cmd','s.set_stream_length(s.stream_request_length, s.stream_request_unit)\n'],
+        ['stream_batch_request','sha-auto_num','stream_batch_request='],
         ['streams', 'auto-cfg_list','streams="{"""stream_set""":'],
         # init new iirClass object in run_conf:
         ['iir_ctrl-init','cfg_cmd', 'iir_ctrl=s.add_iir("iir_ctrl", s.sampling_freq/s.batch_size)\n'],
@@ -165,6 +181,9 @@ class stabilizerClass:
         # struct needed for autosetup, needs to be last entry for iir_ctrl
         # attributes
         ['iir_ctrl','auto-cfg-obj_iir', 'iir_ctrl='],
+        ['lines_config_threshold','cfg-auto_num','lines_config/threshold='],
+        ['lines_config_offset','cfg-auto_num','lines_config/offset='],
+        ['lines_config_hysteresis','cfg-auto_num','lines_config/hysteresis='],
         ['plot-init','cfg_cmd', 'plot=s.add_plot()\n'],
         ['stream_decimation','cfg_num',''],
         ['plot.plots','cfg_list',''],
@@ -188,13 +207,13 @@ class stabilizerClass:
             'ErrDemod': ['VOLT', 'np.short', 'Error signal demodulated & filtered', 'Voltage [V]'],
             'CtrlDac': ['DAC', 'np.ushort', 'VCO control signal on DAC', 'Voltage [V]'],
             'CtrlSig': ['DAC', 'np.ushort','VCO control signal from Signal Generator', 'Voltage [V]'],
-            'Srch': ['NUM', 'np.ushort','Spectral feature detection', 'Voltage [V]'],
+            'Lines': ['NUM', 'np.short','Spectral feature detection', 'Arbitrary Unit'],
         }
     }
     
     
     def __init__(self, application):
-        self.execute_update = 1
+        self.execute_update = 0
         self.commit_opened = 0
         self.committing = False
         self.stream_requesting = False
@@ -208,6 +227,7 @@ class stabilizerClass:
         self.data = None
         self.received_batch_count = 0
         self.received_frame_count = 0
+        self.request_counter = 0
         self.stream_kill = 0
         (filename,line_number,function_name,text)=traceback.extract_stack()[-2]
         def_name = text[:text.find('=')].strip()
@@ -217,6 +237,10 @@ class stabilizerClass:
         self.stream_format = 0
         self.print_cmd = False
         self.rewrite_conf = 0
+        self.stream_request_unit = 'batches'
+        self.stream_request_length = 0
+        self.dropped_frames = 0
+        self.list_dropped_frames = 0
         
         basic_settings = self.BASIC_SETTINGS[application]
         for i in range(0,len(basic_settings)):
@@ -228,6 +252,7 @@ class stabilizerClass:
         # settings update and data streaming
         if self.stream == 1:
             self.stream_connect()
+            self.msg_connect()
             autosetup(self) 
             
             if self.stream_mode == 'Cont':
@@ -254,6 +279,8 @@ class stabilizerClass:
                         self.data_from_int()   
                         if self.plot_data == 1:
                             self.plot.update()
+                        self.reset_stream_request()
+                        self.arbitrary_task()
         
             if self.stream_mode == 'Shot':
                 self.stream_clear_buf()
@@ -264,8 +291,10 @@ class stabilizerClass:
                 self.decimate()
                 self.data_from_int()
                 self.plot.update()
+                self.arbitrary_task()
                     
             self.stream_close()
+            self.msg_close()
         
         elif self.execute_update == 1:
             self.stream_batch_request = 0
@@ -274,6 +303,62 @@ class stabilizerClass:
         # Saving data as csv
         if (self.save_data == 1):
             self.save(self.save_tag)
+    
+    def set_stream_length(self, length, unit):
+        bpf = self.batches_per_frame()
+        if unit == 'samples':
+            batches = length/self.batch_size
+            self.stream_batch_request = int(int(batches/bpf)*bpf)
+        elif unit == 'batches':
+            self.stream_batch_request = int(int(length/bpf)*bpf)
+        elif unit == 'frames':
+            self.stream_batch_request = int(length*bpf)
+        elif unit == 's':
+            samples = int(length*self.sampling_freq)
+            batches = int(samples/self.batch_size)
+            self.stream_batch_request = int(int(batches/bpf)*bpf)
+        elif unit == 'ms':
+            samples = int(length*self.sampling_freq/1e3)
+            batches = int(samples/self.batch_size)
+            self.stream_batch_request = int(int(batches/bpf)*bpf)
+        elif unit == 'us':
+            samples = int(length*self.sampling_freq/1e6)
+            batches = int(samples/self.batch_size)
+            self.stream_batch_request = int(int(batches/bpf)*bpf)
+        self.stream_request_unit = unit
+        self.stream_request_length = length
+    
+    def get_stream_length(self, batches):
+        bpf = self.batches_per_frame()
+        if self.stream_request_unit == 'samples':
+            return int(batches*self.batch_size)
+        elif self.stream_request_unit == 'batches':
+            return int(batches)
+        elif self.stream_request_unit == 'frames':
+            return int(batches/bpf)
+        elif self.stream_request_unit == 's':
+            samples = int(batches*self.batch_size)
+            return samples/self.sampling_freq
+        elif self.stream_request_unit == 'ms':
+            samples = int(batches*self.batch_size)
+            return samples/self.sampling_freq*1e3
+        elif self.stream_request_unit == 'us':
+            samples = int(batches*self.batch_size)
+            return samples/self.sampling_freq*1e6
+            
+    def batches_per_frame(self):
+        return self.frame_payload/self.batch_size/self.stream_channels/2
+    
+    def rx_batches_to_frames(self):
+        return int(self.received_batch_count/self.batches_per_frame())
+
+    def rx_frames_to_batches(self):
+        return int(self.received_frame_count*self.batches_per_frame())
+    
+    def req_batches_to_frames(self):
+        bpf = self.batches_per_frame()
+        self.stream_batch_request = int(int(self.stream_batch_request/bpf)*bpf)
+        return int(self.stream_batch_request/bpf)    
     
     def get_gain(self, afe):
         if afe == 0:
@@ -299,22 +384,56 @@ class stabilizerClass:
             self.commit_opened = 0
  
     def stream_connect(self):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.setsockopt(socket.SOL_SOCKET,\
-                                               socket.SO_RCVBUF,0x7FFFFFFF)
-        if self.timeout is not None:
-            self.socket.settimeout(self.timeout)
-        
-        try:
-            self.socket.bind(("", self.port))
-        except:
-            logger.error('Cannot bind UDP socket for streaming, possibibly'\
-                 +' due to already existing connection.\nTerminated process.'\
-                 +' Try again or restart console if the error persists')
-            sys.exit()   
+        if self.stream_port != 0:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setsockopt(socket.SOL_SOCKET,\
+                                                   socket.SO_RCVBUF,0x7FFFFFFF)
+            if self.timeout is not None:
+                self.socket.settimeout(self.timeout)
+            
+            try:
+                self.socket.bind(("", self.stream_port))
+                self.stream_socket_opened = 1
+            except:
+                logger.error('Cannot bind UDP socket for streaming,'\
+                    +' possibibly due to already existing connection.\n'\
+                    +'Terminated process. '\
+                    +'Try again or restart console if the error persists')
+                sys.exit()   
+    
+    def msg_connect(self):
+        if self.msg_port != 0:
+            self.msg_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.msg_socket.setsockopt(socket.SOL_SOCKET,\
+                                                   socket.SO_RCVBUF,0x7FFFFFFF)
+            if self.timeout is not None:
+                self.msg_socket.settimeout(self.timeout)
+            
+            try:
+                self.msg_socket.bind(("", self.msg_port))
+                self.msg_socket_opened = 1
+            except:
+                logger.error('Cannot bind UDP socket for messages,'\
+                    +' possibibly due to already existing connection.\n'\
+                    +'Terminated process. '\
+                    +'Try again or restart console if the error persists')
+                sys.exit()   
     
     def stream_close(self):
-        self.socket.close()
+        try: 
+            if (self.stream_socket_opened == 1):
+                self.socket.close()
+                self.stream_socket_opened = 0
+        except:
+            pass
+    
+    def msg_close(self):
+        try: 
+            if (self.msg_socket_opened == 1):
+                self.msg_socket.close()
+                self.msg_socket_opened = 0
+        except:
+            pass
 
     def stream_read(self):
         buf = []
@@ -334,10 +453,17 @@ class stabilizerClass:
         self.received_frame_count = i
         if i < req:
             print('No frames received for '+str(self.timeout)+'s')
-        self.received_batch_count = self.rx_frames_to_batches()
-        print('Received batches: '+str(self.received_batch_count)+'/'\
-                                  +str(self.stream_batch_request))        
-                
+            self.dropped_frames += req-self.received_frame_count
+        self.received_batch_count = self.rx_frames_to_batches() 
+        rx_length = self.get_stream_length(self.received_batch_count)
+        rx_length = str(round(rx_length,5))
+        req_length = self.get_stream_length(self.stream_batch_request) 
+        req_length = str(round(req_length,5))
+        print('Received '+rx_length+' / '+req_length +' '\
+                                      + self.stream_request_unit)  
+        if self.list_dropped_frames == 1:
+            print('Dropped frames: '+str(self.dropped_frames))       
+        
         self.frames = buf    
     
     def stream_clear_buf(self):
@@ -372,7 +498,7 @@ class stabilizerClass:
         
             if magic != self.MAGIC_WORD:
                 logging.warning('Encountered bad magic header: %s', hex(magic))
-                return
+                continue
             
             batch_count = int(len(parse_buf) / bytes_per_batch)
             
@@ -434,34 +560,6 @@ class stabilizerClass:
             # set converted data with it's defined name as stabilizer attribute
             setattr(self, self.streams[i], data_i)
             
-    def rx_batches_to_frames(self):
-        # frame length is fixed at 1024 bytes payload data on Stabilizer
-        if self.application == 'ms_control':
-        # 1024bytes/(4 sets batch * 8 samples per batch * 2 bytes per sample)
-            return int(self.received_batch_count/16)
-        
-        logger.error('rx_batches_to_frames: unknown application. Return 0')
-        return 0
-        
-        
-    def rx_frames_to_batches(self):
-        # frame length is fixed at 1024 bytes payload data on Stabilizer
-        if self.application == 'ms_control':
-        # 1024bytes/(4 sets batch * 8 samples per batch * 2 bytes per sample)
-            return int(self.received_frame_count*16)
-        
-        logger.error('rx_frames_to_batches: unknown application. Return 0')
-        return 0
-    
-    def req_batches_to_frames(self):
-        # frame length is fixed at 1024 bytes payload data on Stabilizer
-        if self.application == 'ms_control':
-        # 1024bytes/(4 sets batch * 8 samples per batch * 2 bytes per sample)
-            return int(self.stream_batch_request/16)
-        
-        logger.error('rx_batches_to_frames: unknown application. Return 0')
-        return 0
-            
     def write_conf(self):
         cr = "\n"
         conf_list = self.CONF[self.application]
@@ -504,7 +602,7 @@ class stabilizerClass:
             for i in range(0, len(conf_list)):
                 conf_type = conf_list[i][1].partition('_')[0]
                 # check if conf_list entry is selected for updates
-                type_check = 'cfg' in conf_type
+                type_check = ('cfg' in conf_type) | ('sha' in conf_type)
                 type_check = type_check & (not ('cmd' in conf_list[i][1]))
                 type_check = type_check & (not ('cmt' in conf_list[i][1]))
                 type_check = type_check & (not ('chld' in conf_list[i][1]))
@@ -555,7 +653,8 @@ class stabilizerClass:
         elif conf_type == 'tar':
             broker = self.broker.replace(".",",")
             cmd = self.prefix+conf_list_i[2]+'"{"""ip""":['+broker\
-                                            +'], """port""":9933}"'
+                                        +'], """port""":'+\
+                                        str(rgetattr(self,conf_list_i[0]))+'}"'
         elif conf_type == 'iir':
             iir = rgetattr(self,conf_list_i[0])          
             cmd = self.prefix+conf_list_i[2]+'"{"""ba""":'+ str(rgetattr(iir,'ba'))\
@@ -580,8 +679,15 @@ class stabilizerClass:
     def set_stream_request(self):
         if self.stream_requesting:
             cmd = self.prefix+'stream_request='+'true'
-            shell_cmd(cmd, self.timeout, self.print_cmd, True)
+            if self.stream_mode == 'Cont':
+                res = shell_cmd(cmd, self.timeout, self.print_cmd, False)
+                print('('+str(self.request_counter)+') '+res[0:-1])
+                self.request_counter += 1 
+            else:
+                shell_cmd(cmd, self.timeout, self.print_cmd, True)
+                
     def reset_stream_request(self):
+        asd = 1
         if self.stream_requesting:
             cmd = self.prefix+'stream_request='+'false'
             shell_cmd(cmd, self.timeout, 0, False)
@@ -676,6 +782,16 @@ class stabilizerClass:
                 
         print('Saved data as '+filename)
         
+    def arbitrary_task(self):
+        task = 'arb_'+self.application+'(self)' 
+        try:
+            exec(task)        
+        except:
+            logger.error('Arbitrary task '+'arb_'+self.application+' failed.')
+
+
+        
+        
 def shell_cmd(cmd, timeout, print_cmd, print_return):
     if print_cmd:
         print(cmd)
@@ -749,10 +865,13 @@ class plotClass:
         self.parent = _parent
         self.xtype = 'time_s'
         self.xlim = 'auto'
+        self.xlabel = 'Samples'
         self.ylim = 'auto'
         self.init = 0    
         self.tolerance = 0.1
         self.refresh_ylim = 1
+        self.persistent = False
+        self.persistent_color = False
         self.plots = self.parent.streams
 
     def update(self):  
@@ -788,7 +907,7 @@ class plotClass:
                         self.xlabel = data_info[self.plots[i]][2]+\
                             ' as ' + data_info[self.plots[i]][3]
             except: 
-                pass
+                xdata = np.arange(0,xlen)
         else: 
             xdata = np.arange(0,xlen)
         
@@ -832,8 +951,6 @@ class plotClass:
 
         # set y labels and titles
         for i in range(0,len(self.plots)):
-            # uncomment following line for saving all lines in figure
-            #self.lines.append(self.ax[i].plot(xdata, data)[0])
             self.ax[i].set_title(data_info[self.plots[i]][2], fontsize=10)
             self.ax[i].set_ylabel(data_info[self.plots[i]][3], fontsize=10) 
 
@@ -844,7 +961,7 @@ class plotClass:
             self.ax[i].set_xlim(xlim)
   
             ydata = rgetattr(self.parent, self.plots[i])
-             
+           
             # get y limits
             if  isinstance(self.ylim, str):
                 if (self.ylim == 'auto') & (self.refresh_ylim == 1):
@@ -852,7 +969,15 @@ class plotClass:
             else:
                 self.ax[i].set_ylim(self.ylim[i])  
             
-            self.lines[i].set_ydata(ydata)
+             # uncomment following line for saving all lines in figure
+            if self.persistent:
+                if self.persistent_color:
+                    clr = '#1f77b4'
+                    self.lines.append(self.ax[i].plot(xdata, ydata, clr)[0]) 
+                else:
+                    self.lines.append(self.ax[i].plot(xdata, ydata)[0]) 
+            else:
+                self.lines[i].set_ydata(ydata)
             
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
@@ -996,5 +1121,50 @@ def rgetattr(obj, attr, *args):
     def _getattr(obj, attr):
         return getattr(obj, attr, *args)
     return functools.reduce(_getattr, [obj] + attr.split('.'))
+
+def arb_ms_control(s):
+    
+    if s.app_mode != 'SrchMan':
+        return
+    
+    cmd = s.prefix+'msg_transmit='+'true'
+    shell_cmd(cmd, s.timeout, s.print_cmd, True)
+    
+    buf = b'x00'
+    ready = select.select([s.msg_socket], [], [], s.timeout)
+    if len(ready[0]) > 0:
+        buf = s.msg_socket.recv(s.msg_size)
+    else:
+        print('No line locations received for '+str(s.timeout)+'s')
+    
+    cmd = s.prefix+'msg_transmit='+'false'
+    shell_cmd(cmd, s.timeout, s.print_cmd, True)
+    
+    try:
+       # Parse out header data
+        magic, format_id, msg_length, sequence_number =\
+                        struct.unpack_from(s.MSG_HEADER_FORMAT, buf)
+        parse_buf = buf[struct.calcsize(s.MSG_HEADER_FORMAT):]
+
+        if magic != s.MSG_MAGIC_WORD:
+            logging.warning('Encountered bad magic header: %s for'+\
+                            ' line locations', hex(magic))
+            return
+        
+        data = np.zeros(msg_length, np.uint)
+        
+        if msg_length == 0:
+            print('Found no lines')
+        else:
+            for i in range(0, msg_length):
+                data[i] = int(struct.unpack_from('<H', parse_buf)[0])
+                parse_buf = parse_buf[struct.calcsize('<H'):]
+        
+            print('Found lines at CTRL DAC outputs [V]:')
+            for i in range(0,msg_length):
+                line = volt_from_dac(data[i])
+                print('['+str(i)+']: '+str(line))
+    except:
+        logger.error('Failed at processing line locations')
 
 

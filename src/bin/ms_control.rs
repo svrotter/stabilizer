@@ -20,17 +20,18 @@ use stabilizer::{
     dac::{Dac0Output, Dac1Output, DacCode}, 
     design_parameters::TIMER_FREQUENCY, 
     hal, 
-    signal_generator_sr, 
+    signal_generator_sr,
     system_timer::SystemTimer}, 
     net::{
             data_stream::{FrameGenerator, StreamFormat, StreamTarget},
+            udp_messages::{MsgFrameGenerator, MessageFormat, MessageTarget},
             miniconf::Miniconf,
             serde::{Deserialize, Serialize},
             telemetry::{Telemetry, TelemetryBuffer},
             NetworkState, NetworkUsers,
         }};
 use miniconf::MiniconfAtomic;
-        
+
 // The number of samples in each batch process as a power of 2
 const BATCH_SIZE_LOG2: u8 = 3;
 
@@ -42,6 +43,10 @@ const BATCH_SIZE: usize = 1<<BATCH_SIZE_LOG2;
 const ADC_SAMPLE_TICKS: u32 = 208;
 
 const STREAM_SET_SIZE: usize = 4;
+const STREAM_FRAME_PAYLOAD: u16 = 1024;
+const BATCHES_PER_FRAME: u16 = (STREAM_FRAME_PAYLOAD as f32/
+                                BATCH_SIZE as f32/
+                                STREAM_SET_SIZE as f32 /2.0) as u16;
 
 const LUT_SIZE: usize = 32;
 const BATCH_PER_LUT: usize = LUT_SIZE>>BATCH_SIZE_LOG2;
@@ -52,7 +57,10 @@ const IIR_CASCADE_LENGTH: usize = 1;
 const DAC_CTRL_VMIN: f32 = 0.0;
 const DAC_CTRL_VMAX: f32 = 10.0;
 
+const LINES_SIZE: usize = 32;
+
 static mut SIGNAL_BUF: [i16; BATCH_SIZE] = [0; BATCH_SIZE];
+static mut SEARCH_BUF: [i16; BATCH_SIZE] = [0; BATCH_SIZE];
 static mut DEMOD_BUF: [f32; BATCH_SIZE] = [0.0; BATCH_SIZE];
 static mut ERROR_BUF: [u16; BATCH_SIZE] = [0; BATCH_SIZE];
 static mut STREAM_BUF: [u16; BATCH_SIZE*STREAM_SET_SIZE] = [0; BATCH_SIZE*STREAM_SET_SIZE];
@@ -73,18 +81,19 @@ pub enum AppMode {
     Ctrl = 1,
     CtrlMan = 2,
     CtrlRef = 3,
-    ManSrch = 4,
+    SrchMan = 4,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Miniconf, PartialEq)]
 pub enum Data {
-    Mod = 0,
-    Demod = 1,
-    ErrMod = 2,
-    ErrDemod = 3,
-    CtrlDac = 4,
-    CtrlSig = 5,
-    Srch = 6,
+    None = 0,
+    Mod = 1,
+    Demod = 2,
+    ErrMod = 3,
+    ErrDemod = 4,
+    CtrlDac = 5,
+    CtrlSig = 6,
+    Lines = 7,
 }
 
 #[derive(Copy, Clone, Debug, Miniconf, Deserialize)]
@@ -98,18 +107,44 @@ pub struct LutConfig{
     signal: signal_generator_sr::Signal,
 }
 
+#[derive(Copy, Clone, Debug, Deserialize, Miniconf)]
+pub struct LinesConfig{
+    threshold: f32,
+    offset: f32,
+    hysteresis: f32,
+}
+#[derive(Copy, Clone, Debug)]
+pub struct Lines{
+    config: LinesConfig,
+    minmax: i8,
+    found_line: bool,
+    location: [u16; LINES_SIZE],
+    location_type: [i8; LINES_SIZE],
+    location_idx: usize,
+}
+impl Lines{
+    pub fn new() -> Self {
+        Self {
+            config: LinesConfig{
+                threshold: 0.01,
+                offset: 0.0,
+                hysteresis: 0.001,
+            },
+            minmax: 0,
+            found_line: false,
+            location: [0; LINES_SIZE],
+            location_type: [0; LINES_SIZE],
+            location_idx: 0,    
+        }
+    }
+}
+
+
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, MiniconfAtomic)]
 pub struct Streams {
     pub stream_set: [Data; STREAM_SET_SIZE],
 }
 
-impl Streams {
-    pub const fn new() -> Self {
-        Self {
-            stream_set:  [Data::ErrMod, Data::ErrDemod, Data::CtrlDac, Data::Mod],
-        }
-    }
-}
 
 #[derive(Copy, Clone, Debug)]
 pub struct Lut{
@@ -166,6 +201,11 @@ pub struct Settings {
     /// Any non-zero value less than 65536.
     telemetry_period: u16,
 
+    msg_target: MessageTarget,
+    msg_transmit: bool,
+    msg_count: u16,
+    msg_request: u16,
+
     stream_target: StreamTarget,
     stream_batch_request: u32,
     stream_batch_count: u32,
@@ -184,6 +224,8 @@ pub struct Settings {
 
     app_mode: AppMode,
 
+    lines_config: LinesConfig,
+
     commit: bool,
 }
 
@@ -194,15 +236,28 @@ impl Default for Settings {
             afe: [Gain::G1, Gain::G1],
 
             // The default telemetry period in seconds.
-            telemetry_period: 5,
+            telemetry_period: 0,
 
-            stream_target: StreamTarget::default(),
+            msg_target: MessageTarget{
+                ip: [192,168,137,1],
+                port: 9934,
+            },
+            msg_transmit: false,
+            msg_count: 0,
+            msg_request: 1,
+
+            stream_target: StreamTarget{
+                ip: [192,168,137,1],
+                port: 9933,
+            },
             stream_batch_count: 0,
             stream_batch_request: 0,
             stream_trigger: signal_generator_sr::Trigger::Rising,
             stream_mode: StreamMode::Stop,
             stream_request: false,
-            streams: Streams::new(),
+            streams: Streams{
+                stream_set: [Data::ErrMod, Data::ErrDemod, Data::CtrlDac, Data::Mod]
+            },
 
             lut_config: 
                 // modulation LUT
@@ -249,6 +304,8 @@ impl Default for Settings {
 
             app_mode: AppMode::Man,
 
+            lines_config: Lines::new().config,
+
             commit: false,
         }
     }
@@ -268,9 +325,11 @@ mod app {
     struct Shared {
         network: NetworkUsers<Settings, Telemetry>,
         settings: Settings,
+        msg_generator: MsgFrameGenerator,
         telemetry: TelemetryBuffer,
         lut: [Lut; 2],
         signal_generator_ctrl: signal_generator_sr::SignalGenerator,
+        lines: Lines,
     }
 
     #[local]
@@ -280,6 +339,7 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
         signal: &'static mut [i16],
+        search: &'static mut [i16],
         demod: &'static mut [f32],
         error: &'static mut [u16],
         stream_buf: &'static mut [u16],
@@ -310,6 +370,8 @@ mod app {
                 .unwrap(),
         );
 
+        let msg_generator = network
+            .configure_messaging(MessageFormat::Unknown);
         let generator = network
             .configure_streaming(StreamFormat::Unknown, BATCH_SIZE as u8);
 
@@ -321,15 +383,14 @@ mod app {
         stabilizer.dacs.0.start();
         stabilizer.dacs.1.start();
 
-        // Spawn a settings and telemetry update for default settings.
-        //settings_update::spawn().unwrap();
-        telemetry_task::spawn().unwrap();
-        ethernet_link::spawn().unwrap();
+        let mut lines_init: Lines = Lines::new();
+        lines_init.config = settings.lines_config;
         
         let mut shared = Shared {
             network,
             telemetry: TelemetryBuffer::default(),
             settings,
+            msg_generator,
             lut: [Lut{
                 data: [0; LUT_SIZE],
                 idx: 0,
@@ -345,9 +406,13 @@ mod app {
                 settings.signal_generator_ctrl
                 .try_into_config(ADC_SAMPLE_TICKS).unwrap()
             ),
+            lines: lines_init,
         };
         shared.lut[0].update();
         shared.lut[1].update();
+
+        shared.network.set_msg_destination(settings.msg_target.into());
+        shared.network.direct_stream(settings.stream_target.into());
 
         let local = Local {
             afes: stabilizer.afes,
@@ -355,6 +420,7 @@ mod app {
             dacs: stabilizer.dacs,
             generator,
             signal: unsafe{&mut SIGNAL_BUF[0..]},
+            search: unsafe{&mut SEARCH_BUF[0..]},
             demod: unsafe{&mut DEMOD_BUF[0..]},
             error: unsafe{&mut ERROR_BUF[0..]},
             stream_buf: unsafe{&mut STREAM_BUF[0..]},
@@ -364,6 +430,12 @@ mod app {
             stream_trigger: unsafe{STREAM_TRIGGER},
         };
  
+        // Spawn a settings and telemetry update for default settings.
+        ethernet_link::spawn().unwrap();
+        if settings.telemetry_period > 0 {
+            telemetry_task::spawn().unwrap();
+        }
+
         // Start sampling ADCs (start as late as possible to prevent processing congestion)
         stabilizer.adc_dac_timer.start();
 
@@ -374,9 +446,10 @@ mod app {
     /// Main DSP processing routine.
     ///
     #[task(binds=DMA1_STR4, 
-        shared=[settings, telemetry, lut, signal_generator_ctrl], 
-        local=[adcs, dacs, generator, signal, demod, error, stream_buf, accu, accu_idx, iir_state, stream_trigger], 
-        priority=2)]
+        shared=[settings, telemetry, lut, signal_generator_ctrl,lines], 
+        local=[adcs, dacs, generator, search, signal, demod, error, stream_buf, 
+                accu, accu_idx, iir_state, stream_trigger], 
+        priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         
@@ -385,6 +458,7 @@ mod app {
             telemetry,
             lut,
             signal_generator_ctrl,
+            lines,
         } = c.shared;
 
         
@@ -392,6 +466,7 @@ mod app {
             adcs: (ref mut adc0, ref mut adc1),
             dacs: (ref mut dac0, ref mut dac1),
             generator,
+            search,
             signal,
             demod,
             error,
@@ -402,8 +477,8 @@ mod app {
             stream_trigger,
         } = c.local;
 
-        (settings, telemetry, lut, signal_generator_ctrl).lock(
-            |settings, telemetry, lut, signal_generator_ctrl| {
+        (settings, telemetry, lut, signal_generator_ctrl, lines).lock(
+            |settings, telemetry, lut, signal_generator_ctrl, lines| {
                 (adc1, adc0, dac0, dac1).lock(|adc1, adc0, dac0, dac1| {
 
                     // feed dac1 buffer with new modulation values
@@ -429,7 +504,6 @@ mod app {
                         error_b += accu[i];
                     }
                 
-
                     match settings.app_mode {
                         AppMode::Man => {
                             // feed dac0 buffer with new manual ctrl values and check if trigger occured on ctrl signal
@@ -484,7 +558,91 @@ mod app {
                                 dac0[i] = DacCode::from(u_i16+settings.ctrl_offset_i16).0;
                             }                           
                         }
-                        _ => ()
+                        AppMode::SrchMan => {
+                            let old_dac = dac0[0];
+                            for i in 0..BATCH_SIZE{
+                                signal[i] = signal_generator_ctrl.next().unwrap()+settings.ctrl_offset_i16;
+                                dac0[i] = DacCode::from(signal[i]).0;
+                                
+                                let trigger = signal_generator_ctrl.triggered(settings.stream_trigger);
+                                if trigger && (settings.stream_batch_count > 0) {
+                                    *stream_trigger = true;
+                                }
+                            }   
+
+                            if *stream_trigger{
+                                if (error_b+lines.config.offset) > (lines.config.threshold+lines.config.hysteresis){
+                                    if lines.minmax == 0 {
+                                        lines.minmax = 1;
+                                    }
+                                    else {
+                                        lines.found_line = false;
+                                    }
+                                    for i in 0..BATCH_SIZE{
+                                        search[i] = 1;
+                                    }
+                                }
+                                else if (error_b+lines.config.offset) < -(lines.config.threshold+lines.config.hysteresis){
+                                    if lines.minmax == 0 {
+                                        lines.minmax = -1;
+                                    }
+                                    else {
+                                        lines.found_line = false;
+                                    }
+                                    for i in 0..BATCH_SIZE{
+                                        search[i] = -1;
+                                    }
+                                }
+                                else if idsp::abs(error_b+lines.config.offset) < (lines.config.threshold-lines.config.hysteresis) {
+                                    if !lines.found_line & (lines.minmax == 2) {
+                                        lines.minmax = 0;
+                                    }
+                                    for i in 0..BATCH_SIZE{
+                                        search[i] = 0;
+                                    }    
+                                
+                                }
+
+                                match lines.minmax{
+                                    -1 => {
+                                        if error_b > 0.0 {
+                                            lines.found_line = true;
+                                            if *stream_trigger{
+                                                lines.location_type[lines.location_idx] = -1;
+                                                lines.location[lines.location_idx] = dac0[0];
+                                                lines.location_idx += 1;
+                                                if lines.location_idx == LINES_SIZE{
+                                                    lines.location_idx = 0;
+                                                }
+
+                                                lines.minmax = 2;
+                                                for i in 0..BATCH_SIZE{
+                                                    search[i] = 2;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        if error_b < 0.0 {
+                                            lines.found_line = true;
+                                            if *stream_trigger{
+                                                lines.location_type[lines.location_idx] = -1;
+                                                lines.location[lines.location_idx] = dac0[0];
+                                                lines.location_idx += 1;
+                                                if lines.location_idx == LINES_SIZE{
+                                                    lines.location_idx = 0;
+                                                }
+                                                lines.minmax = 2;
+                                                for i in 0..BATCH_SIZE{
+                                                    search[i] = 2;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => ()
+                                }
+                            }    
+                        }
                     }
                     
                     // stretch decimate error to batch length and convert for streaming
@@ -498,6 +656,11 @@ mod app {
 
                     for i in 0..STREAM_SET_SIZE {
                         match settings.streams.stream_set[i] {
+                            Data::None=>{
+                                for j in 0..BATCH_SIZE {
+                                    stream_buf[i*BATCH_SIZE+j] = 0;
+                                }
+                            }
                             Data::Mod => {
                                 for j in 0..BATCH_SIZE {
                                     stream_buf[i*BATCH_SIZE+j] = dac1[j];
@@ -528,8 +691,10 @@ mod app {
                                     stream_buf[i*BATCH_SIZE+j] = DacCode::from(signal[j]).0;
                                 }    
                             }
-                            Data::Srch => {
-                                //todo
+                            Data::Lines => {
+                                for j in 0..BATCH_SIZE {
+                                    stream_buf[i*BATCH_SIZE+j] = search[j] as u16;
+                                }    
                             }
                         }
                     }
@@ -544,50 +709,51 @@ mod app {
                         lut[1].idx = 0;
                     }
 
-                    if (settings.stream_batch_count > 0) && *stream_trigger {
+                    if settings.stream_batch_count > 0 {
                         // Stream the data.
-                        const N: usize = BATCH_SIZE * core::mem::size_of::<u16>();
-                        generator.add::<_, { N * STREAM_SET_SIZE }>(|buf| {
-                            let data = unsafe {
-                                core::slice::from_raw_parts(
-                                    stream_buf.as_ptr() as *const u8,
-                                    N*STREAM_SET_SIZE,
-                                )
-                            };
-                            buf.copy_from_slice(data)
-                        
-                        });
-                        
-                        settings.stream_batch_count-=1;
-
+                        if *stream_trigger{
+                            const N: usize = BATCH_SIZE * core::mem::size_of::<u16>();
+                            generator.add::<_, { N * STREAM_SET_SIZE }>(|buf| {
+                                let data = unsafe {
+                                    core::slice::from_raw_parts(
+                                        stream_buf.as_ptr() as *const u8,
+                                        N*STREAM_SET_SIZE,
+                                    )
+                                };
+                                buf.copy_from_slice(data)
+                            });
+                            
+                            settings.stream_batch_count-=1;
+                        }
+                        // reset the trigger if this was last batch
                         if settings.stream_batch_count == 0 {
                             match settings.stream_mode {
                                 StreamMode::Shot => {
-                                    generator.flush(); 
                                     *stream_trigger = false;
                                 }
-                                StreamMode::Cont => {
-                                    generator.flush(); 
+                                StreamMode::Cont => { 
                                     *stream_trigger = false;    
                                 }
-                                StreamMode::Stop => {
-                                    generator.flush(); 
+                                StreamMode::Stop => { 
                                     *stream_trigger = false;
                                     settings.stream_batch_request = 0;
                                 }
                             }
                         }
                     }
-                    // Update telemetry measurements.
-                    // telemetry.adcs = [ todo
-                    //     AdcCode(stream_data[0][0]),
-                    //     AdcCode(adc1[0]),
-                    // ];
 
-                    // telemetry.dacs = [
-                    //     DacCode(stream_data[2][0]),
-                    //     DacCode(stream_data[3][0]),
-                    // ];
+                    if settings.telemetry_period > 0 {
+                        //Update telemetry measurements.
+                        telemetry.adcs = [ 
+                            AdcCode(adc0[0]),
+                            AdcCode(adc1[0]),
+                        ];
+
+                        telemetry.dacs = [
+                            DacCode(dac0[0]),
+                            DacCode(dac1[0]),
+                        ];
+                    }
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
@@ -599,6 +765,7 @@ mod app {
     #[idle(shared=[network])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
+            // poll for settings changes and process streaming and messages
             match c.shared.network.lock(|net| net.update()) {
                 NetworkState::SettingsChanged => {
                     settings_update::spawn().unwrap()
@@ -609,7 +776,7 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes], shared=[network, settings, lut, signal_generator_ctrl])]
+    #[task(priority = 1, local=[afes], shared=[network, settings, lut, signal_generator_ctrl, lines])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());  
         if settings.commit {
@@ -619,7 +786,8 @@ mod app {
 
             let target = settings.stream_target.into();
             c.shared.network.lock(|net| net.direct_stream(target));
-            
+            let msg_target = settings.msg_target.into();
+            c.shared.network.lock(|net| net.set_msg_destination(msg_target));
 
             let mut lut_temp: [Lut; 2] =
                 [Lut{
@@ -647,17 +815,39 @@ mod app {
                 sg_ctrl.update_waveform(sg_config);
             });
 
-            c.shared.settings.lock(|current| {
-                *current = settings;
-                current.ctrl_offset_i16 = (settings.ctrl_offset * (i16::MAX as f32 / (2.5*4.096))) as i16;
+            // Update the line search parameter
+            c.shared.lines.lock(|lines| {
+                lines.config.threshold = settings.lines_config.threshold;
+                lines.config.offset = settings.lines_config.offset;
+                lines.config.hysteresis = settings.lines_config.hysteresis;
             });
 
+            c.shared.settings.lock(|current| {
+                // Respawn telemetry task if needed
+                if current.telemetry_period == 0 {
+                    if settings.telemetry_period > 0 {
+                        telemetry_task::spawn().unwrap();
+                    }
+                }
+                *current = settings;
+                current.ctrl_offset_i16 = (settings.ctrl_offset * (i16::MAX as f32 / (2.5*4.096))) as i16;
+
+            });
         }
         if settings.stream_request{
-            c.shared.settings.lock(|current| {
-                current.stream_batch_count = current.stream_batch_request;
+            // round batch request to integer number of frames
+            let stream_breq = (settings.stream_batch_request/BATCHES_PER_FRAME as u32)
+                                            *BATCHES_PER_FRAME as u32;
+            c.shared.settings.lock(|current| {    
+                current.stream_batch_count = stream_breq;
             });
-        }  
+        }
+        if settings.msg_transmit{
+            c.shared.settings.lock(|current| {    
+                current.msg_count = settings.msg_request;
+                send_lines::spawn().unwrap();
+            });
+        }
     }
 
     #[task(priority = 1, shared=[network, settings, telemetry])]
@@ -677,10 +867,12 @@ mod app {
         });
 
         // Schedule the telemetry task in the future.
-        telemetry_task::Monotonic::spawn_after(
-            (telemetry_period as u32).seconds(),
-        )
-        .unwrap();
+        if telemetry_period > 0 {
+            telemetry_task::Monotonic::spawn_after(
+                (telemetry_period as u32).seconds(),
+            )
+            .unwrap();
+        }
     }
 
     #[task(priority = 1, shared=[network])]
@@ -693,4 +885,49 @@ mod app {
     fn eth(_: eth::Context) {
         unsafe { hal::ethernet::interrupt_handler() }
     }
+
+    #[task(priority = 2, shared=[network, settings, msg_generator, lines])]
+    fn send_lines(mut c: send_lines::Context) {
+        let mut msg_count: u16 = 0;
+        c.shared.settings.lock(| settings |{
+            settings.msg_count -= 1;
+            msg_count = settings.msg_count
+        });
+        
+        // const LENGTH: usize = 17;
+        // let mut dummy_lines: [u16; LINES_SIZE] = [0; LINES_SIZE];
+        // for i in 0..LENGTH {
+        //     dummy_lines[i] = i as u16;
+        // }  
+
+        let mut lines = Lines::new();
+        
+        c.shared.lines.lock(|lines_shared|{
+            lines = *lines_shared;
+            lines_shared.location_idx = 0; // todo is that ok?
+        });
+        //lines.location = dummy_lines; // todo remove this
+        //lines.location_idx = LENGTH;
+
+        const N: usize = core::mem::size_of::<u16>()*LINES_SIZE;
+        c.shared.msg_generator.lock(|msg_generator|{
+            msg_generator.add::<_, { N }>(|buf| {
+                let data = unsafe {
+                    core::slice::from_raw_parts(
+                        lines.location.as_ptr() as *const u8,
+                        N,
+                    )
+                };
+                buf.copy_from_slice(data)
+            }); 
+            
+            msg_generator.set_msg_len(lines.location_idx as u16);  
+            msg_generator.queue_for_tx();    
+        });
+
+        if msg_count > 0{
+            send_lines::spawn().unwrap();
+        }
+    }
+
 }

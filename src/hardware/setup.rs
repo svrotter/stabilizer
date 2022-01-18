@@ -20,7 +20,7 @@ use super::{
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
-const NUM_UDP_SOCKETS: usize = 1;
+const NUM_UDP_SOCKETS: usize = 2;   
 const NUM_SOCKETS: usize = NUM_UDP_SOCKETS + NUM_TCP_SOCKETS;
 
 pub struct NetStorage {
@@ -28,7 +28,9 @@ pub struct NetStorage {
 
     // Note: There is an additional socket set item required for the DHCP socket.
     pub sockets:
-        [Option<smoltcp::socket::SocketSetItem<'static>>; NUM_SOCKETS + 1],
+        //SCR removed DHCP socket
+        //[Option<smoltcp::socket::SocketSetItem<'static>>; NUM_SOCKETS+1],
+        [Option<smoltcp::socket::SocketSetItem<'static>>; NUM_SOCKETS],  
     pub tcp_socket_storage: [TcpSocketStorage; NUM_TCP_SOCKETS],
     pub udp_socket_storage: [UdpSocketStorage; NUM_UDP_SOCKETS],
     pub neighbor_cache:
@@ -37,6 +39,7 @@ pub struct NetStorage {
         [Option<(smoltcp::wire::IpCidr, smoltcp::iface::Route)>; 8],
 }
 
+#[derive(Copy, Clone)] 
 pub struct UdpSocketStorage {
     rx_storage: [u8; 1024],
     tx_storage: [u8; 2048],
@@ -85,7 +88,8 @@ impl Default for NetStorage {
             )],
             neighbor_cache: [None; 8],
             routes_cache: [None; 8],
-            sockets: [None, None, None, None, None, None],
+            //SCR removed one socket (DHCP) but added another UDP
+            sockets: [None, None, None, None, None, None], 
             tcp_socket_storage: [TcpSocketStorage::new(); NUM_TCP_SOCKETS],
             udp_socket_storage: [UdpSocketStorage::new(); NUM_UDP_SOCKETS],
         }
@@ -721,17 +725,22 @@ pub fn setup(
         let store =
             cortex_m::singleton!(: NetStorage = NetStorage::default()).unwrap();
 
+        // SCR change stabilizer address here
         store.ip_addrs[0] = smoltcp::wire::IpCidr::new(
             smoltcp::wire::IpAddress::Ipv4(
-                smoltcp::wire::Ipv4Address::UNSPECIFIED,
+                //smoltcp::wire::Ipv4Address::UNSPECIFIED,
+                smoltcp::wire::Ipv4Address::new(192,168,137,17),
             ),
-            0,
+            //SCR changed prefix_len
+           24, 
+            //0, 
         );
 
+        // SCR set default gateway
         let mut routes =
             smoltcp::iface::Routes::new(&mut store.routes_cache[..]);
         routes
-            .add_default_ipv4_route(smoltcp::wire::Ipv4Address::UNSPECIFIED)
+            .add_default_ipv4_route(smoltcp::wire::Ipv4Address::UNSPECIFIED,)
             .unwrap();
 
         let neighbor_cache =
@@ -778,7 +787,8 @@ pub fn setup(
                 sockets.add(udp_socket);
             }
 
-            sockets.add(smoltcp::socket::Dhcpv4Socket::new());
+            //SCR don't add DHCP socket
+            //sockets.add(smoltcp::socket::Dhcpv4Socket::new()); 
 
             sockets
         };
