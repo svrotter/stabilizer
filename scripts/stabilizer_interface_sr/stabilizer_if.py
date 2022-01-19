@@ -980,6 +980,7 @@ class plotClass:
                 self.lines[i].set_ydata(ydata)
             
         self.fig.canvas.draw()
+        plt.pause(0.0001)
         self.fig.canvas.flush_events()
             
 def load(filename):
