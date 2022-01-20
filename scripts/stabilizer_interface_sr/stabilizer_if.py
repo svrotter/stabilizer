@@ -25,6 +25,9 @@ from iir_coefficients import pid_coefficients
 import functools
 from copy import deepcopy
 from scipy import signal
+import shlex
+import platform
+import warnings
 
 
 
@@ -219,7 +222,7 @@ class stabilizerClass:
         self.stream_requesting = False
         self.telemetry_period = 10
         self.broker = '192.168.137.1'
-        self.mac = '04-91-62-d9-4c-7f'
+        self.mac = '04-91-62-d9-83-19'
         self.application = application
         self.gain_afe0 = 'G1'
         self.gain_afe0 = 'G1'
@@ -245,8 +248,18 @@ class stabilizerClass:
         basic_settings = self.BASIC_SETTINGS[application]
         for i in range(0,len(basic_settings)):
             setattr(self, basic_settings[i][0], basic_settings[i][1])
-        self.prefix = 'python -m miniconf --broker '+self.broker+' dt/sinara/'\
+        self.prefix = 'python3 -m miniconf --broker '+self.broker+' dt/sinara/'\
                                     +self.application+'/'+self.mac+' '
+
+        if platform.system() == 'Windows':
+            self.islnx = False
+        elif platform.system() == 'Linux':
+            self.islnx = True
+        else:
+            warnings.warn("OS cound not be determined, defaulting to Windows. \
+                                    This could lead to errors with system commands.")
+            self.islnx = False     
+
     
     def run(self):
         # settings update and data streaming
@@ -370,7 +383,7 @@ class stabilizerClass:
     def commit_open(self):
         if self.committing & (self.commit_opened == 0):       
             cmd = self.prefix+'commit='+'false'
-            res = shell_cmd(cmd, self.timeout, self.print_cmd,False)
+            res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
                 print('commit=false: OK')
             self.commit_opened = 1
@@ -378,7 +391,7 @@ class stabilizerClass:
     def commit_close(self):
         if self.committing & (self.commit_opened == 1):       
             cmd = self.prefix+'commit='+'true'
-            res = shell_cmd(cmd, self.timeout, self.print_cmd,False)
+            res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
                 print('commit=true: OK')
             self.commit_opened = 0
@@ -639,33 +652,42 @@ class stabilizerClass:
                 print('Terminating stream')
                 self.commit_open() 
                 cmd = self.prefix+'stream_mode="""Stop"""'
-                shell_cmd(cmd, self.timeout, self.print_cmd, True)
+                shell_cmd(cmd, self.timeout, self.print_cmd, True, self.islnx)
                 self.reset_stream_request()
             self.commit_close() 
         
     def update_setting(self, conf_list_i):
-        ap = '"""'
+        if self.islnx:
+            ap = '\'"'
+            ep = '"\''
+            sp = '\''
+            dp = '"'
+        else:
+            ap = '"""'
+            ep = '"""'
+            sp = '"'
+            dp = '"""'
         conf_type = conf_list_i[1].partition('_')[2]
         if conf_type == 'num':
             cmd = self.prefix+conf_list_i[2]+str(rgetattr(self,conf_list_i[0]))
         elif conf_type == 'str':
-            cmd = self.prefix+conf_list_i[2]+ap+rgetattr(self,conf_list_i[0])+ap
+            cmd = self.prefix+conf_list_i[2]+ap+rgetattr(self,conf_list_i[0])+ep
         elif conf_type == 'tar':
             broker = self.broker.replace(".",",")
-            cmd = self.prefix+conf_list_i[2]+'"{"""ip""":['+broker\
-                                        +'], """port""":'+\
-                                        str(rgetattr(self,conf_list_i[0]))+'}"'
+            cmd = self.prefix+conf_list_i[2]+sp+'{'+dp+'ip'+dp+':['+broker\
+                                        +'], '+dp+'port'+dp+':'+\
+                                        str(rgetattr(self,conf_list_i[0]))+'}'+sp
         elif conf_type == 'iir':
             iir = rgetattr(self,conf_list_i[0])          
-            cmd = self.prefix+conf_list_i[2]+'"{"""ba""":'+ str(rgetattr(iir,'ba'))\
-                    +',"""y_min""":'+str(iir.y_min)+', """y_max""":'\
-                    +str(iir.y_max)+', """y_offset""":'+str(iir.y_offset)+'}"' 
+            cmd = self.prefix+conf_list_i[2]+sp+'{'+dp+'ba'+dp+':'+ str(rgetattr(iir,'ba'))\
+                    +','+dp+'y_min'+dp+':'+str(iir.y_min)+', '+dp+'y_max'+dp+':'\
+                    +str(iir.y_max)+', '+dp+'y_offset'+dp+':'+str(iir.y_offset)+'}'+sp 
         elif conf_type == 'list':
             lst = rgetattr(self, conf_list_i[0])
             cmd = self.prefix+conf_list_i[2]+"["
             for i in range(0,len(lst)):
                 if isinstance(lst[i], str):
-                    cmd = cmd+ap+lst[i]+ap+','
+                    cmd = cmd+ap+lst[i]+ep+','
                 else: #assume that it is a number that can be converted to str
                     cmd = cmd+str(lst[i]+',')
             # remove last comma and add closing characters
@@ -673,24 +695,24 @@ class stabilizerClass:
         else:
             return
         
-        shell_cmd(cmd, self.timeout, self.print_cmd, True)
+        shell_cmd(cmd, self.timeout, self.print_cmd, True, self.islnx)
         
      
     def set_stream_request(self):
         if self.stream_requesting:
             cmd = self.prefix+'stream_request='+'true'
             if self.stream_mode == 'Cont':
-                res = shell_cmd(cmd, self.timeout, self.print_cmd, False)
+                res = shell_cmd(cmd, self.timeout, self.print_cmd, False, self.islnx)
                 print('('+str(self.request_counter)+') '+res[0:-1])
                 self.request_counter += 1 
             else:
-                shell_cmd(cmd, self.timeout, self.print_cmd, True)
+                shell_cmd(cmd, self.timeout, self.print_cmd, True, self.islnx)
                 
     def reset_stream_request(self):
         asd = 1
         if self.stream_requesting:
             cmd = self.prefix+'stream_request='+'false'
-            shell_cmd(cmd, self.timeout, 0, False)
+            shell_cmd(cmd, self.timeout, 0, False, self.islnx)
             
     def add_plot(self):
         self.plot = plotClass(self)
@@ -792,9 +814,11 @@ class stabilizerClass:
 
         
         
-def shell_cmd(cmd, timeout, print_cmd, print_return):
+def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
     if print_cmd:
         print(cmd)
+    if islnx:
+        cmd = shlex.split(cmd)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     try:
         p.wait(timeout)
@@ -1129,7 +1153,7 @@ def arb_ms_control(s):
         return
     
     cmd = s.prefix+'msg_transmit='+'true'
-    shell_cmd(cmd, s.timeout, s.print_cmd, True)
+    shell_cmd(cmd, s.timeout, s.print_cmd, True, platform.system=='Linux')
     
     buf = b'x00'
     ready = select.select([s.msg_socket], [], [], s.timeout)
@@ -1139,7 +1163,7 @@ def arb_ms_control(s):
         print('No line locations received for '+str(s.timeout)+'s')
     
     cmd = s.prefix+'msg_transmit='+'false'
-    shell_cmd(cmd, s.timeout, s.print_cmd, True)
+    shell_cmd(cmd, s.timeout, s.print_cmd, True, platform.system=='Linux')
     
     try:
        # Parse out header data
