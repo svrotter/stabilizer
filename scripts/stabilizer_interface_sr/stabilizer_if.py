@@ -811,15 +811,14 @@ class stabilizerClass:
         except:
             logger.error('Arbitrary task '+'arb_'+self.application+' failed.')
 
-
-        
-        
 def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
     if print_cmd:
         print(cmd)
     if islnx:
-        cmd = shlex.split(cmd)
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        cmd_exe = shlex.split(cmd)
+    else:
+        cmd_exe = cmd
+    p = subprocess.Popen(cmd_exe, stdout=subprocess.PIPE)
     try:
         p.wait(timeout)
         stdout, stderr = p.communicate()
@@ -829,8 +828,9 @@ def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
         return res
     except subprocess.TimeoutExpired:
         logger.error('Shell command timeout trying:\n'+cmd)
-        return '[ERROR]: shell command'
         p.kill()
+        return '[ERROR]: shell command failed!'
+        
     
 
 
