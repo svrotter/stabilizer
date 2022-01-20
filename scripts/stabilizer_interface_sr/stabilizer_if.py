@@ -389,7 +389,7 @@ class stabilizerClass:
             cmd = self.prefix+'commit='+'false'
             res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
-                print('commit=false: OK')
+                print('commit=false: OK', flush=True)
             self.commit_opened = 1
 
     def commit_close(self):
@@ -397,7 +397,7 @@ class stabilizerClass:
             cmd = self.prefix+'commit='+'true'
             res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
-                print('commit=true: OK')
+                print('commit=true: OK', flush=True)
             self.commit_opened = 0
  
     def stream_connect(self):
@@ -465,11 +465,11 @@ class stabilizerClass:
                     ready = select.select([self.socket], [], [], self.timeout)
         else:
             self.stream_kill = 1
-            print('Stream killed')
+            print('Stream killed', flush=True)
         
         self.received_frame_count = i
         if i < req:
-            print('No frames received for '+str(self.timeout)+'s')
+            print('No frames received for '+str(self.timeout)+'s', flush=True)
             self.dropped_frames += req-self.received_frame_count
         self.received_batch_count = self.rx_frames_to_batches() 
         rx_length = self.get_stream_length(self.received_batch_count)
@@ -477,9 +477,9 @@ class stabilizerClass:
         req_length = self.get_stream_length(self.stream_batch_request) 
         req_length = str(round(req_length,5))
         print('Received '+rx_length+' / '+req_length +' '\
-                                      + self.stream_request_unit)  
+                                      + self.stream_request_unit, flush=True)  
         if self.list_dropped_frames == 1:
-            print('Dropped frames: '+str(self.dropped_frames))       
+            print('Dropped frames: '+str(self.dropped_frames), flush=True)       
         
         self.frames = buf    
     
@@ -653,7 +653,7 @@ class stabilizerClass:
                             self.update_setting(conf_list[i])
                     
             if self.stream_kill == 1:
-                print('Terminating stream')
+                print('Terminating stream', flush=True)
                 self.commit_open() 
                 cmd = self.prefix+'stream_mode="""Stop"""'
                 shell_cmd(cmd, self.timeout, self.print_cmd, True, self.islnx)
@@ -709,7 +709,7 @@ class stabilizerClass:
             cmd = self.prefix+'stream_request='+'true'
             if self.stream_mode == 'Cont':
                 res = shell_cmd(cmd, self.timeout, self.print_cmd, False, self.islnx)
-                print('('+str(self.request_counter)+') '+res[0:-1])
+                print('('+str(self.request_counter)+') '+res[0:-1], flush=True)
                 self.request_counter += 1 
             else:
                 shell_cmd(cmd, self.timeout, self.print_cmd, True, self.islnx)
@@ -808,7 +808,7 @@ class stabilizerClass:
                     row =  [attrs[i][0], attrs[i][1], rgetattr(self,attrs[i][0])]
                     dataWriter.writerow(row)
                 
-        print('Saved data as '+filename)
+        print('Saved data as '+filename, flush=True)
         
     def arbitrary_task(self):
         task = 'arb_'+self.application+'(self)' 
@@ -819,7 +819,7 @@ class stabilizerClass:
 
 def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
     if print_cmd:
-        print(cmd)
+        print(cmd, flush=True)
     if islnx:
         cmd_exe = shlex.split(cmd)
     else:
@@ -830,7 +830,7 @@ def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
         stdout, stderr = p.communicate()
         res = stdout.decode("utf-8")
         if print_return:
-            print(res[0:-1])
+            print(res[0:-1], flush=True)
         return res
     except subprocess.TimeoutExpired:
         logger.error('Shell command timeout trying:\n'+cmd)
@@ -888,7 +888,7 @@ class iirClass:
         ax[1].set_xlabel('Frequency [Hz]')
         ax[0].grid(which='both', axis='both')
         ax[1].grid(which='both', axis='both')
-        plt.show()
+        plt.draw()
 
 class plotClass:
     def __init__(self, _parent=None):
@@ -1084,7 +1084,7 @@ def autosetup(stabilizer):
     if s.execute_update == 0:
         return
     
-    print('Executing autosetup...')
+    print('Executing autosetup...', flush=True)
     
     conf_list = s.CONF[s.application]
     if s.commit_opened == 0:
@@ -1096,7 +1096,7 @@ def autosetup(stabilizer):
             s.update_setting(conf_list[i])
             
     s.commit_close()
-    print('Autosetup finished')   
+    print('Autosetup finished', flush=True)   
 
 def volt_from_dac(dac_code):
     """ Returns voltage from Stabilizer uint DAC code"""
@@ -1132,13 +1132,13 @@ def save_plot(idx, filename):
     if plt.fignum_exists(idx):
         plt.figure(idx)
     else:
-        print('[ERROR savePlotToPdf]: Figure '+str(idx)+' does not exist')
+        print('[ERROR savePlotToPdf]: Figure '+str(idx)+' does not exist', flush=True)
         return None
     try:
         plt.savefig(filename+'.pdf')
     except:
         print('[ERROR savePlotToPdf]: Figure '+str(idx)+' cannot be saved.'+\
-              'Maybe a different program blocks the process')
+              'Maybe a different program blocks the process', flush=True)
         return None
        
 # With kind regards to 
@@ -1166,7 +1166,7 @@ def arb_ms_control(s):
     if len(ready[0]) > 0:
         buf = s.msg_socket.recv(s.msg_size)
     else:
-        print('No line locations received for '+str(s.timeout)+'s')
+        print('No line locations received for '+str(s.timeout)+'s', flush=True)
     
     cmd = s.prefix+'msg_transmit='+'false'
     shell_cmd(cmd, s.timeout, s.print_cmd, True, platform.system=='Linux')
@@ -1185,16 +1185,16 @@ def arb_ms_control(s):
         data = np.zeros(msg_length, np.uint)
         
         if msg_length == 0:
-            print('Found no lines')
+            print('Found no lines', flush=True)
         else:
             for i in range(0, msg_length):
                 data[i] = int(struct.unpack_from('<H', parse_buf)[0])
                 parse_buf = parse_buf[struct.calcsize('<H'):]
         
-            print('Found lines at CTRL DAC outputs [V]:')
+            print('Found lines at CTRL DAC outputs [V]:', flush=True)
             for i in range(0,msg_length):
                 line = volt_from_dac(data[i])
-                print('['+str(i)+']: '+str(line))
+                print('['+str(i)+']: '+str(line), flush=True)
     except:
         logger.error('Failed at processing line locations')
 
