@@ -218,14 +218,14 @@ class stabilizerClass:
     }
     
     
-    def __init__(self, application):
+    def __init__(self, application, mac, broker):
         self.execute_update = 0
         self.commit_opened = 0
         self.committing = False
         self.stream_requesting = False
         self.telemetry_period = 10
-        self.broker = '192.168.137.1'
-        self.mac = '04-91-62-d9-4c-7f'
+        self.broker = broker
+        self.mac = mac
         self.application = application
         self.gain_afe0 = 'G1'
         self.gain_afe0 = 'G1'

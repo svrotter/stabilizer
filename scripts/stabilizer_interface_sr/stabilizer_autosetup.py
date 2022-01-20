@@ -12,7 +12,9 @@ import stabilizer_if
 
 
 # Create instance of Stabilizer device class and add plot instance
-stabilizer = stabilizer_if.stabilizerClass('ms_control')
+mac = '04-91-62-d9-4c-7f'
+broker = '192.168.137.1'
+stabilizer = stabilizer_if.stabilizerClass('ms_control', mac, broker)
 
 """ Script flow options """
 #execute settings update immediately if =1
