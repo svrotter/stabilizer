@@ -27,7 +27,6 @@ from copy import deepcopy
 from scipy import signal
 import shlex
 import platform
-import warnings
 
 
 
@@ -256,8 +255,9 @@ class stabilizerClass:
         elif platform.system() == 'Linux':
             self.islnx = True
         else:
-            warnings.warn("OS cound not be determined, defaulting to Windows. \
-                                    This could lead to errors with system commands.")
+            logger.warning("Operation system could not be determined,"\
+                           +" defaulting to Windows.\
+                           This could lead to errors with system commands.")
             self.islnx = False     
 
     
