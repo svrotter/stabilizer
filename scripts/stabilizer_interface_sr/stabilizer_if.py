@@ -139,7 +139,11 @@ class stabilizerClass:
     #   cmd: command to be executed in run_conf, needs to be paired with
     #        setting type cfg. E.g. used for init objects in run_conf           
     #   cmt: comment printed in run_conf
-    #   list: python list of basic types
+    #   list: python list of basic types. If a list is chosen with auto type,
+    #         the miniconf path is a list of the struct containing the list
+    #         and the name of the field with contains the list entries.
+    #         Eg. in ms_control onboard settings struct streams with field
+    #         stream_set requires ['streams=','stream_set']
     #   lim: plot limits (string or list)
     'ms_control':
       
@@ -169,7 +173,7 @@ class stabilizerClass:
         ['stream_request_unit','cfg_str',''],
         ['stream_request','cfg_cmd','s.set_stream_length(s.stream_request_length, s.stream_request_unit)\n'],
         ['stream_batch_request','sha-auto_num','stream_batch_request='],
-        ['streams', 'auto-cfg_list','streams="{"""stream_set""":'],
+        ['streams', 'auto-cfg_list',['streams=', 'stream_set']],
         # init new iirClass object in run_conf:
         ['iir_ctrl-init','cfg_cmd', 'iir_ctrl=s.add_iir("iir_ctrl", s.sampling_freq/s.batch_size)\n'],
         ['iir_ctrl.Kp','cfg-chld_num',''],
@@ -662,11 +666,13 @@ class stabilizerClass:
             ep = '"\''
             sp = '\''
             dp = '"'
+            lp = '"'
         else:
             ap = '"""'
             ep = '"""'
             sp = '"'
             dp = '"""'
+            lp = '"""'
         conf_type = conf_list_i[1].partition('_')[2]
         if conf_type == 'num':
             cmd = self.prefix+conf_list_i[2]+str(rgetattr(self,conf_list_i[0]))
@@ -684,14 +690,14 @@ class stabilizerClass:
                     +str(iir.y_max)+', '+dp+'y_offset'+dp+':'+str(iir.y_offset)+'}'+sp 
         elif conf_type == 'list':
             lst = rgetattr(self, conf_list_i[0])
-            cmd = self.prefix+conf_list_i[2]+"["
+            cmd = self.prefix+conf_list_i[2][0]+sp+'{'+lp+conf_list_i[2][1]+lp+":["
             for i in range(0,len(lst)):
                 if isinstance(lst[i], str):
-                    cmd = cmd+ap+lst[i]+ep+','
+                    cmd = cmd+lp+lst[i]+lp+','
                 else: #assume that it is a number that can be converted to str
                     cmd = cmd+str(lst[i]+',')
             # remove last comma and add closing characters
-            cmd = cmd[0:-1]+']}"'
+            cmd = cmd[0:-1]+']}'+sp
         else:
             return
         
