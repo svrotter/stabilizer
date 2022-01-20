@@ -222,7 +222,7 @@ class stabilizerClass:
         self.stream_requesting = False
         self.telemetry_period = 10
         self.broker = '192.168.137.1'
-        self.mac = '04-91-62-d9-83-19'
+        self.mac = '04-91-62-d9-4c-7f'
         self.application = application
         self.gain_afe0 = 'G1'
         self.gain_afe0 = 'G1'
@@ -248,7 +248,7 @@ class stabilizerClass:
         basic_settings = self.BASIC_SETTINGS[application]
         for i in range(0,len(basic_settings)):
             setattr(self, basic_settings[i][0], basic_settings[i][1])
-        self.prefix = 'python3 -m miniconf --broker '+self.broker+' dt/sinara/'\
+        self.prefix = 'python -m miniconf --broker '+self.broker+' dt/sinara/'\
                                     +self.application+'/'+self.mac+' '
 
         if platform.system() == 'Windows':
