@@ -1,20 +1,22 @@
+#%% imports and loading path
 import os
 import sys
 path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(path)
-import stabilizer_if
+sys.path.insert(0, path+'/stabilizer_autosetup_mod')
+import stabilizer_mod
 
 #todo
+# python command via islnx
 
 # receive udp messages on stabilizer
 # implement PRBS
 # measure plant dead time
+# PSD of signals
 
-
-# Create instance of Stabilizer device class and add plot instance
-mac = '04-91-62-d9-4c-7f'
-broker = '192.168.137.1'
-stabilizer = stabilizer_if.stabilizerClass('ms_control', mac, broker)
+#%% Create instance of Stabilizer device class 
+BROKER = '192.168.137.1'
+MAC = '04-91-62-d9-4c-7f'
+stabilizer = stabilizer_mod.stabilizerClass('ms_control', MAC, BROKER)
 
 """ Script flow options """
 #execute settings update immediately if =1
@@ -30,11 +32,11 @@ stabilizer.save_tag = 'saveload_test'
 
 """## Stabilizer device settings ##"""
 # ms_control application modes
-stabilizer.app_mode = 'Man'
+#stabilizer.app_mode = 'Man'
 #stabilizer.app_mode = 'Ctrl'
 #stabilizer.app_mode = 'CtrlMan'
 #stabilizer.app_mode = 'CtrlRef'
-#stabilizer.app_mode = 'SrchMan'
+stabilizer.app_mode = 'SrchMan'
 
 """# Stabilizer basic settings #"""
 # Stabilizer telemetry period
@@ -52,7 +54,7 @@ stabilizer.stream_decimation = 1
 
 # data to be streamed
 # availabe options: Mod Demod ErrMod ErrDemod CtrlDac CtrlSig Lines
-stabilizer.streams = ['ErrMod','Mod','ErrDemod','CtrlDac']
+stabilizer.streams = ['ErrMod','ErrDemod','CtrlDac','Lines']
 
 # set the length of data stream in different units 
 # This length will be rounded to fit full frames and may be smaller at the end
@@ -65,7 +67,7 @@ stabilizer.list_dopped_frames = 1
 """# Modulation/Demodulation settings #"""
 """ Modulation LUT settings """
 # Modulation voltage amplitude
-stabilizer.lut_config0_amplitude = 1
+stabilizer.lut_config0_amplitude = 0.5
 # Modulation signal phase in deg
 stabilizer.lut_config0_phase_offset_deg = 0
 
@@ -96,7 +98,7 @@ stabilizer.sig_ctrl_stream_trigger = 'PeakMin'
 stabilizer.add_iir('iir_ctrl', stabilizer.sampling_freq/stabilizer.batch_size)
 stabilizer.iir_ctrl.Kp=-0.1
 stabilizer.iir_ctrl.Ki=-100
-stabilizer.iir_ctrl.Kd=-2e-05
+stabilizer.iir_ctrl.Kd=-5e-05
 stabilizer.iir_ctrl.y_min = -2
 stabilizer.iir_ctrl.y_max = 2
 stabilizer.iir_ctrl.compute_coeff()
@@ -136,7 +138,7 @@ stabilizer.run()
 # stabilizer.save('some_tag')
 
 # load and plot example
-# s = stabilizer_if.load('ms_control_saveload_test_1.csv')
+#s = stabilizer_mod.load('ms_control_saveload_test_8.csv')
 # s.add_plot()
 # s.plot.plots = ['ErrMod','ErrDemod','CtrlDac']
 # s.data_from_int()

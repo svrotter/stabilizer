@@ -7,7 +7,11 @@ import subprocess
 from datetime import datetime
 import sys
 import os
+from pathlib import Path
 path = os.path.dirname(os.path.realpath(__file__))
+parent_path = str(Path(path).parents[0]);
+sys.path.insert(0, path)
+sys.path.insert(0, parent_path)
 import numpy as np
 import csv
 import matplotlib.pyplot as plt
@@ -29,204 +33,72 @@ import shlex
 import platform
 
 
-
 class stabilizerClass:
     """ Provides access to Stabilizer's livestreamed data and settings """
-
-    # The magic header half-word at the start of each packet.
-    MAGIC_WORD = 0x057B
-    MSG_MAGIC_WORD = 0x057C
-
-
-    # The struct format of the header.
-    HEADER_FORMAT = '<HBBL'
-    
-    # The struct format of the header.
-    #https://docs.python.org/3/library/array.html
-    MSG_HEADER_FORMAT = '<HBHL'
-
-    # All supported formats by this reception script. The items in this dict 
-    # are functions that return the struct deserialization code to unpack 
-    # a single batch and the number of different data fields in a batch.
-    FORMAT = {
-        # dummy entry, information is gathered from application settings
-        0: lambda batch_size: \
-            (f'<{batch_size}H{batch_size}H{batch_size}H{batch_size}H', 4), 
-        # uint16; uint16; uint16; uint16 
-        1: lambda batch_size: \
-            (f'<{batch_size}H{batch_size}H{batch_size}H{batch_size}H', 4),
-        # int16; int16; uint16; uint16   
-        2: lambda batch_size: \
-            (f'<{batch_size}h{batch_size}h{batch_size}H{batch_size}H', 4),
+    def __init__(self, application, mac=None, broker=None, dicts=None):
+        if platform.system() == 'Windows':
+            self.islnx = False
+        elif platform.system() == 'Linux':
+            self.islnx = True
+        else:
+            logger.warning("Operation system could not be determined,"\
+                           +" defaulting to Windows.\
+                           This could lead to errors with system commands.")
+            self.islnx = False 
         
-    }
-    
-    # dictionary of supported gains of Stabilizer's AFEs 
-    GAINS = {
-        'G1': 1,
-        'G2': 2,
-        'G5': 5,
-        'G10': 10
-    }
-    
-    BASIC_SETTINGS = {
-        'ms_control': {0: ['sampling_freq', 1/(10e-9*208)],
-                      1: ['stream_port', 9933],
-                      2: ['frame_size', 1032],
-                      3: ['frame_payload', 1024],
-                      4: ['batch_size', 8],
-                      5: ['committing', True],
-                      6: ['stream_requesting', True],
-                      7: ['stream_format', 0],
-                      8: ['stream_channels', 4],
-                      9: ['msg_port', 9934],
-                     10: ['msg_size', 521],
-        }
-    }
-    
-    # dictionary of settings and their types for save/load functions
-    SAVE = {
-    'ms_control': 
-        [['application','str'],
-        ['mac','str'],
-        ['app_mode','str'],
-        ['sampling_freq','float'],
-        ['batch_size','int'],
-        ['gain_afe0','str'],
-        ['gain_afe1','str'],
-        ['stream_batch_request','int'], 
-        ['received_batch_count','int'], 
-        ['received_frame_count','int'], 
-        ['lut_config0_amplitude','float'],
-        ['lut_config0_phase_offset_deg','float'],
-        ['lut_config1_amplitude','float'],
-        ['lut_config1_phase_offset_deg','float'],
-        ['ctrl_offset','float'],
-        ['sig_ctrl_signal','str'],
-        ['sig_ctrl_frequency','float'],
-        ['sig_ctrl_amplitude','float'],
-        ['sig_ctrl_offset','float'],
-        ['sig_ctrl_stream_trigger','str'],
-        ['iir_ctrl','cmd','s.add_iir("iir_ctrl", s.sampling_freq/s.batch_size)'],
-        ['iir_ctrl.Kp','float'],
-        ['iir_ctrl.Ki','float'],
-        ['iir_ctrl.Kd','float'],
-        ['iir_ctrl.y_offset','float'],
-        ['iir_ctrl.y_min','float'],
-        ['iir_ctrl.y_max','float'],
-        ['stream_decimation','int'],
-        ['streams','list_str_4'],
-        ['data','np_int_4','streams']]
-    }
-    
-    # dictionary of settings, their type and miniconf path 
-    CONF = {
-    #regular entries [stabilizer attribute name, type, miniconf path]
-    # double entries for stabilizer attribute names are forbidden
-    # type: (setting types)_(data type)
-    # setting types:
-    #    cfg -> save/update in run_conf
-    #    auto -> execute automated update on remote device
-    #    obj -> needs to be set if attribute is an object. 
-    #           The attributes of the object can't have auto tag
-    #    sha -> "shadow" attributes, that are changed in run_conf but not
-    #           mentioned directly
-    # data types:
-    #   num: number
-    #   str: string (or enum on stabilizer)
-    #   tar: streaming target
-    #   iir: iir filter of iirClass
-    #   cmd: command to be executed in run_conf, needs to be paired with
-    #        setting type cfg. E.g. used for init objects in run_conf           
-    #   cmt: comment printed in run_conf
-    #   list: python list of basic types. If a list is chosen with auto type,
-    #         the miniconf path is a list of the struct containing the list
-    #         and the name of the field with contains the list entries.
-    #         Eg. in ms_control onboard settings struct streams with field
-    #         stream_set requires ['streams=','stream_set']
-    #   lim: plot limits (string or list)
-    'ms_control':
-      
-        [['s-init','cfg_cmd', 's=stabilizerClass("ms_control")\n'],
-        ['stream_kill','cfg_num',''],
-        ['rewrite_conf','cfg_num',''],
-        ['app_mode', 'auto-cfg_str', 'app_mode='],
-        ['telemetry_period', 'cfg-auto_num','telemetry_period='],
-        ['gain_afe0','cfg-auto_str','afe/0='],
-        ['gain_afe1','cfg-auto_str','afe/1='],
-        ['lut_config0_amplitude','cfg-auto_num','lut_config/0/amplitude='],
-        ['lut_config0_phase_offset_deg','cfg-auto_num',\
-                                 'lut_config/0/phase_offset_deg='],
-        ['lut_config1_amplitude','cfg-auto_num','lut_config/1/amplitude='],
-        ['lut_config1_phase_offset_deg','cfg-auto_num',\
-                                 'lut_config/1/phase_offset_deg='],
-        ['ctrl_offset','auto-cfg_num','ctrl_offset='],
-        ['sig_ctrl_signal','cfg-auto_str','signal_generator_ctrl/signal='],
-        ['sig_ctrl_frequency','cfg-auto_num','signal_generator_ctrl/frequency='],
-        ['sig_ctrl_amplitude','cfg-auto_num','signal_generator_ctrl/amplitude='],
-        ['sig_ctrl_offset','cfg-auto_num','signal_generator_ctrl/offset='],
-        ['sig_ctrl_stream_trigger','cfg-auto_str','stream_trigger='],
-        ['stream_port','auto_tar','stream_target='],
-        ['msg_port','auto_tar','msg_target='],
-        ['stream_mode','auto_str','stream_mode='],
-        ['stream_request_length','cfg_num',''],
-        ['stream_request_unit','cfg_str',''],
-        ['stream_request','cfg_cmd','s.set_stream_length(s.stream_request_length, s.stream_request_unit)\n'],
-        ['stream_batch_request','sha-auto_num','stream_batch_request='],
-        ['streams', 'auto-cfg_list',['streams=', 'stream_set']],
-        # init new iirClass object in run_conf:
-        ['iir_ctrl-init','cfg_cmd', 'iir_ctrl=s.add_iir("iir_ctrl", s.sampling_freq/s.batch_size)\n'],
-        ['iir_ctrl.Kp','cfg-chld_num',''],
-        ['iir_ctrl.Ki','cfg-chld_num',''],
-        ['iir_ctrl.Kd','cfg-chld_num',''],
-        ['iir_ctrl.ba','cfg-chld_cmd','iir_ctrl.ba=s.iir_ctrl.compute_coeff()\n'],
-        ['iir_ctrl.ba-cmt','cfg_cmt','#s.iir_ctrl.ba=[0,0,0,0,0]\n'],
-        ['iir_ctrl.y_offset','cfg-chld_num',''],#auto included in iir_ctrl struct
-        ['iir_ctrl.y_min','cfg-chld_num',''],#auto tag included in iir_ctrl struct
-        ['iir_ctrl.y_max','cfg-chld_num',''],#auto tag included in iir_ctrl struct
-        # struct needed for autosetup, needs to be last entry for iir_ctrl
-        # attributes
-        ['iir_ctrl','auto-cfg-obj_iir', 'iir_ctrl='],
-        ['lines_config_threshold','cfg-auto_num','lines_config/threshold='],
-        ['lines_config_offset','cfg-auto_num','lines_config/offset='],
-        ['lines_config_hysteresis','cfg-auto_num','lines_config/hysteresis='],
-        ['plot-init','cfg_cmd', 'plot=s.add_plot()\n'],
-        ['stream_decimation','cfg_num',''],
-        ['plot.plots','cfg_list',''],
-        ['plot.xlim','cfg_lim',''],
-        ['plot.ylim','cfg_cmt','#s.plot.xlim=(-1,1)\n'],
-        ['plot.ylim','cfg_lim',''],
-        ['plot.ylim','cfg_cmt','#s.plot.ylim=[(-1,1),(-1,1),(-1,1)]\n'],
-        ['plot.xtype','cfg_str',''],
-        ['plot.tolerance','cfg_num',''],
-        ['plot.refresh_ylim','cfg_num','']
-        ]
-    }
+        # check for python version and correct miniconf command
+        i = 1
+        arg = ' -V'
+        pyversion = None
+        while(i<4):
+            if i > 1:
+                cmd = 'python'+str(i)
+            else:
+                cmd = 'python'
+            try:
+                res = shell_cmd(cmd+arg,1,False,False, self.islnx)
+            except: 
+                res = 'Well, that version seems not to be working...'
+                
+            if len(res) > len('Python X.X.X\r\n'): 
+                # probably no valid version found
+                pass
+            else:
+                py = cmd
+                version = res
+            i += 1
         
-    DATA_INFO = { 
-        # refer to https://numpy.org/doc/stable/user/basics.types.html for
-        # data types
-        'ms_control': {
-            'Mod': ['DAC', 'np.ushort','Modulation signal', 'Voltage [V]'],
-            'Demod': ['DAC', 'np.ushort', 'Demodulation signal', 'Voltage [V]'],            
-            'ErrMod': ['VOLT', 'np.short', 'Error signal modulated (ADC input)', 'Voltage [V]'],
-            'ErrDemod': ['VOLT', 'np.short', 'Error signal demodulated & filtered', 'Voltage [V]'],
-            'CtrlDac': ['DAC', 'np.ushort', 'VCO control signal on DAC', 'Voltage [V]'],
-            'CtrlSig': ['DAC', 'np.ushort','VCO control signal from Signal Generator', 'Voltage [V]'],
-            'Lines': ['NUM', 'np.short','Spectral feature detection', 'Arbitrary Unit'],
-        }
-    }
-    
-    
-    def __init__(self, application, mac, broker):
+        if py is None:
+            logger.error('Could not determine Python version.')
+            sys.exit()
+        elif isinstance(py,str):
+            try:
+                V = int(version[7])
+                if V<3:
+                    logger.warning('Python version might not be supported')    
+            except:
+                logger.warning('Python version might not be supported')  
+            
+        self.application = application
+        if mac is None:
+            self.mac = '04-91-62-d9-4c-7f'
+        else:
+            self.mac = mac
+        if broker is None:
+            self.broker = '192.168.137.1'
+        else:
+            self.broker = broker
+        
+        if dicts is None:
+            self.dicts='dflt'
+        else:
+            self.dicts = dicts
+        self.load_dict()
         self.execute_update = 0
         self.commit_opened = 0
         self.committing = False
         self.stream_requesting = False
         self.telemetry_period = 10
-        self.broker = broker
-        self.mac = mac
-        self.application = application
         self.gain_afe0 = 'G1'
         self.gain_afe0 = 'G1'
         self.frames = []
@@ -248,22 +120,12 @@ class stabilizerClass:
         self.dropped_frames = 0
         self.list_dropped_frames = 0
         
-        basic_settings = self.BASIC_SETTINGS[application]
+        
+        basic_settings = self.BASIC_SETTINGS
         for i in range(0,len(basic_settings)):
             setattr(self, basic_settings[i][0], basic_settings[i][1])
-        self.prefix = 'python -m miniconf --broker '+self.broker+' dt/sinara/'\
+        self.prefix = py +' -m miniconf --broker '+self.broker+' dt/sinara/'\
                                     +self.application+'/'+self.mac+' '
-
-        if platform.system() == 'Windows':
-            self.islnx = False
-        elif platform.system() == 'Linux':
-            self.islnx = True
-        else:
-            logger.warning("Operation system could not be determined,"\
-                           +" defaulting to Windows.\
-                           This could lead to errors with system commands.")
-            self.islnx = False     
-
     
     def run(self):
         # settings update and data streaming
@@ -320,6 +182,33 @@ class stabilizerClass:
         # Saving data as csv
         if (self.save_data == 1):
             self.save(self.save_tag)
+    
+    def load_dict(self):
+        try:
+            exec('from general_dict import*')
+        except:
+            logger.error('Cannot find dictionary for general settings')
+            return
+        try:
+            exec('from '+self.application+'_dict import*')
+        except:
+            logger.error('Cannot find settings dictionary for application'+\
+                         self.application)
+            return
+        
+        # following variables are *import from application dictionary
+        # these variables have to be define in a file "application"_dict.py
+        self.MAGIC_WORD=eval('MAGIC_WORD')
+        self.MSG_MAGIC_WORD=eval('MSG_MAGIC_WORD')
+        self.HEADER_FORMAT = eval('HEADER_FORMAT')
+        self.MSG_HEADER_FORMAT = eval('MSG_HEADER_FORMAT')
+        self.STREAM_FORMAT = eval('STREAM_FORMAT')
+        self.GAINS = eval('GAINS')
+        self.BASIC_SETTINGS = eval('BASIC_SETTINGS')
+        self.SAVE = eval('SAVE')
+        self.CONF = eval('CONF')
+        self.DATA_INFO = eval('DATA_INFO')
+        self.PARAM = eval('PARAM')
     
     def set_stream_length(self, length, unit):
         bpf = self.batches_per_frame()
@@ -390,6 +279,8 @@ class stabilizerClass:
             res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
                 print('commit=false: OK', flush=True)
+            else: 
+                print(res, flush=True)
             self.commit_opened = 1
 
     def commit_close(self):
@@ -398,6 +289,8 @@ class stabilizerClass:
             res = shell_cmd(cmd, self.timeout, self.print_cmd,False, self.islnx)
             if ' OK' in res:
                 print('commit=true: OK', flush=True)
+            else:
+                print(res, flush=True)
             self.commit_opened = 0
  
     def stream_connect(self):
@@ -504,8 +397,8 @@ class stabilizerClass:
 
 
             if self.stream_format > 0:           
-                frame_format = self.FORMAT[format_id](batch_size)[0]
-                channels = self.FORMAT[format_id](batch_size)[1]
+                frame_format = self.STREAM_FORMAT[format_id](batch_size)[0]
+                channels = self.STREAM_FORMAT[format_id](batch_size)[1]
                 bytes_per_batch = struct.calcsize(frame_format)
             else:
                 frame_format = '<'+str(batch_size*self.stream_channels)+'H'
@@ -556,10 +449,10 @@ class stabilizerClass:
             logger.error('There is no data to process')
             return None
         
-        data_info = self.DATA_INFO[self.application]
+        data_info = self.DATA_INFO
                         
         for i in range (0, len(self.streams)):
-            # convert data types according to DATA_INFO and not FORMAT
+            # convert data types according to DATA_INFO and not STREAM_FORMAT
             if self.stream_format == 0:
                 self.data[i] = self.data[i].astype(eval(data_info[self.streams[i]][1]))
             
@@ -579,9 +472,9 @@ class stabilizerClass:
             
     def write_conf(self):
         cr = "\n"
-        conf_list = self.CONF[self.application]
-        conf = open(path+'/run_conf.py','w+')
-        conf.write('from stabilizer_if import *\n\n')
+        conf_list = self.CONF[self.dicts]
+        conf = open(parent_path+'/run_conf.py','w+')
+        conf.write('from stabilizer_mod import *\n\n')
         for i in range(0,len(conf_list)):
             conf_type = conf_list[i][1].partition('_')[0]
             if 'cfg' in conf_type:
@@ -613,7 +506,7 @@ class stabilizerClass:
             self.set_run_conf_mod()
             import run_conf
             reload(run_conf)
-            conf_list = self.CONF[self.application]
+            conf_list = self.CONF[self.dicts]
             
             paused_stream = 0 
             for i in range(0, len(conf_list)):
@@ -666,13 +559,11 @@ class stabilizerClass:
             ep = '"\''
             sp = '\''
             dp = '"'
-            lp = '"'
         else:
             ap = '"""'
             ep = '"""'
             sp = '"'
             dp = '"""'
-            lp = '"""'
         conf_type = conf_list_i[1].partition('_')[2]
         if conf_type == 'num':
             cmd = self.prefix+conf_list_i[2]+str(rgetattr(self,conf_list_i[0]))
@@ -681,19 +572,20 @@ class stabilizerClass:
         elif conf_type == 'tar':
             broker = self.broker.replace(".",",")
             cmd = self.prefix+conf_list_i[2]+sp+'{'+dp+'ip'+dp+':['+broker\
-                                        +'], '+dp+'port'+dp+':'+\
-                                        str(rgetattr(self,conf_list_i[0]))+'}'+sp
+                                    +'], '+dp+'port'+dp+':'+\
+                                    str(rgetattr(self,conf_list_i[0]))+'}'+sp
         elif conf_type == 'iir':
             iir = rgetattr(self,conf_list_i[0])          
-            cmd = self.prefix+conf_list_i[2]+sp+'{'+dp+'ba'+dp+':'+ str(rgetattr(iir,'ba'))\
-                    +','+dp+'y_min'+dp+':'+str(iir.y_min)+', '+dp+'y_max'+dp+':'\
-                    +str(iir.y_max)+', '+dp+'y_offset'+dp+':'+str(iir.y_offset)+'}'+sp 
+            cmd = self.prefix+conf_list_i[2]+sp+'{'+dp+'ba'+dp+':'\
+                    +str(rgetattr(iir,'ba'))+','+dp+'y_min'+dp+':'\
+                    +str(iir.y_min)+', '+dp+'y_max'+dp+':'+str(iir.y_max)\
+                    +', '+dp+'y_offset'+dp+':'+str(iir.y_offset)+'}'+sp 
         elif conf_type == 'list':
             lst = rgetattr(self, conf_list_i[0])
-            cmd = self.prefix+conf_list_i[2][0]+sp+'{'+lp+conf_list_i[2][1]+lp+":["
+            cmd = self.prefix+conf_list_i[2][0]+sp+'{'+dp+conf_list_i[2][1]+dp+":["
             for i in range(0,len(lst)):
                 if isinstance(lst[i], str):
-                    cmd = cmd+lp+lst[i]+lp+','
+                    cmd = cmd+dp+lst[i]+dp+','
                 else: #assume that it is a number that can be converted to str
                     cmd = cmd+str(lst[i]+',')
             # remove last comma and add closing characters
@@ -719,6 +611,16 @@ class stabilizerClass:
         if self.stream_requesting:
             cmd = self.prefix+'stream_request='+'false'
             shell_cmd(cmd, self.timeout, 0, False, self.islnx)
+            
+    def stream_request_msg( self ):
+        # wip
+        msg_length = 17
+        sequence_num = 1919
+        message = self.MSG_MAGIC_WORD.to_bytes(2, byteorder='little')
+        message += b'\x02' # key value format
+        message += msg_length.to_bytes(2, byteorder='little')
+        message += sequence_num.to_bytes(4, byteorder='little')
+        
             
     def add_plot(self):
         self.plot = plotClass(self)
@@ -746,7 +648,7 @@ class stabilizerClass:
         
         if os.path.exists('savedData')==False:
             os.mkdir('savedData')
-            sys.path.insert(0, path+'/savedData')
+            sys.path.insert(0, parent_path+'/savedData')
             
         # create timestamp
         stamp = ''
@@ -770,10 +672,11 @@ class stabilizerClass:
             dataWriter = csv.writer(csvfile, delimiter=';', quotechar='',\
                                             quoting=csv.QUOTE_NONE)
             try:
-                attrs = self.SAVE[s.application]
+                attrs = self.SAVE[s.dicts]
             except:
-                logger.error('Unknown application "'+s.application\
-                          + '". Cannot save data.')
+                logger.error('Unknown save dictionary '+s.dicts\
+                             +' for application '+s.application\
+                             + '. Cannot save data.')
                 return
 
             for i in range(0,len(attrs)):
@@ -817,14 +720,17 @@ class stabilizerClass:
         except:
             logger.error('Arbitrary task '+'arb_'+self.application+' failed.')
 
+        
 def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
     if print_cmd:
         print(cmd, flush=True)
+    
     if islnx:
         cmd_exe = shlex.split(cmd)
     else:
         cmd_exe = cmd
-    p = subprocess.Popen(cmd_exe, stdout=subprocess.PIPE)
+    p = subprocess.Popen(cmd_exe, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    
     try:
         p.wait(timeout)
         stdout, stderr = p.communicate()
@@ -835,8 +741,7 @@ def shell_cmd(cmd, timeout, print_cmd, print_return, islnx):
     except subprocess.TimeoutExpired:
         logger.error('Shell command timeout trying:\n'+cmd)
         p.kill()
-        return '[ERROR]: shell command failed!'
-        
+        return ''
     
 
 
@@ -911,7 +816,7 @@ class plotClass:
         #self.parent.data_shape = self.parent.data.shape
         xlen = len(self.parent.data[0])
         
-        data_info = self.parent.DATA_INFO[self.parent.application]
+        data_info = self.parent.DATA_INFO
             
         # get xdata for plots and the xlabels
         if self.xtype == 'time_s':
@@ -1016,6 +921,7 @@ class plotClass:
 def load(filename):
     dir_path = os.path.dirname(os.path.realpath(__file__)) 
     sys.path.append(dir_path+'\\savedData')
+    sys.path.append(dir_path+'\\stabilizer_mod')
     sys.path.append(dir_path)
     fail = 0
     path=filename    
@@ -1032,9 +938,27 @@ def load(filename):
         # Read all rows into a list
         rows = list(csv.reader(csvfile, delimiter=';'))      
         
+        app = None
         for i in range (0,len(rows)):
             if  rows[i][0] == 'application':
                 app = rows[i][2]
+                break
+        if app is None:
+            logger.error('Cannot find application information in '\
+                         +filename)
+            return
+            
+        for i in range (0,len(rows)):
+            if  rows[i][0] == 'dicts':
+                dicts = rows[i][2]
+                break
+        for i in range (0,len(rows)):
+            if  rows[i][0] == 'mac':
+                mac = rows[i][2]
+                break
+        for i in range (0,len(rows)):
+            if  rows[i][0] == 'broker':
+                broker = rows[i][2]
                 break
         
         s = stabilizerClass(app)
@@ -1086,7 +1010,7 @@ def autosetup(stabilizer):
     
     print('Executing autosetup...', flush=True)
     
-    conf_list = s.CONF[s.application]
+    conf_list = s.CONF[s.dicts]
     if s.commit_opened == 0:
         s.commit_open()
     
@@ -1159,7 +1083,7 @@ def arb_ms_control(s):
         return
     
     cmd = s.prefix+'msg_transmit='+'true'
-    shell_cmd(cmd, s.timeout, s.print_cmd, True, platform.system=='Linux')
+    shell_cmd(cmd, s.timeout, s.print_cmd, True, s.islnx)
     
     buf = b'x00'
     ready = select.select([s.msg_socket], [], [], s.timeout)
@@ -1169,7 +1093,7 @@ def arb_ms_control(s):
         print('No line locations received for '+str(s.timeout)+'s', flush=True)
     
     cmd = s.prefix+'msg_transmit='+'false'
-    shell_cmd(cmd, s.timeout, s.print_cmd, True, platform.system=='Linux')
+    shell_cmd(cmd, s.timeout, s.print_cmd, True, s.islnx)
     
     try:
        # Parse out header data

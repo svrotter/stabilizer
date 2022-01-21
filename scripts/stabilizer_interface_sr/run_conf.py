@@ -1,10 +1,10 @@
-from stabilizer_if import *
+from stabilizer_mod import *
 
 s=stabilizerClass("ms_control")
 s.stream_kill=1
 s.rewrite_conf=0
-s.app_mode='CtrlRef'
-s.telemetry_period=10
+s.app_mode='SrchMan'
+s.telemetry_period=0
 s.gain_afe0='G2'
 s.gain_afe1='G1'
 s.lut_config0_amplitude=0.5
@@ -12,13 +12,15 @@ s.lut_config0_phase_offset_deg=0
 s.lut_config1_amplitude=1.0
 s.lut_config1_phase_offset_deg=110
 s.ctrl_offset=6.145
-s.sig_ctrl_signal='Square'
-s.sig_ctrl_frequency=14.671912560096153
-s.sig_ctrl_amplitude=0.005
+s.sig_ctrl_signal='Triangle'
+s.sig_ctrl_frequency=7.335956280048077
+s.sig_ctrl_amplitude=0.1
 s.sig_ctrl_offset=0
 s.sig_ctrl_stream_trigger='PeakMin'
-s.stream_batch_request=4000
-s.streams=['ErrMod', 'ErrDemod', 'CtrlDac', 'CtrlSig']
+s.stream_request_length=500
+s.stream_request_unit='frames'
+s.set_stream_length(s.stream_request_length, s.stream_request_unit)
+s.streams=['ErrMod', 'ErrDemod', 'CtrlDac', 'Lines']
 iir_ctrl=s.add_iir("iir_ctrl", s.sampling_freq/s.batch_size)
 s.iir_ctrl.Kp=-0.1
 s.iir_ctrl.Ki=-100
@@ -28,13 +30,16 @@ iir_ctrl.ba=s.iir_ctrl.compute_coeff()
 s.iir_ctrl.y_offset=0
 s.iir_ctrl.y_min=-2
 s.iir_ctrl.y_max=2
+s.lines_config_threshold=0.025
+s.lines_config_offset=0
+s.lines_config_hysteresis=0.005
 plot=s.add_plot()
 s.stream_decimation=1
-s.plot.plots=['ErrMod', 'ErrDemod', 'CtrlDac', 'CtrlSig']
+s.plot.plots=['ErrMod', 'ErrDemod', 'CtrlDac', 'Lines']
 s.plot.xlim='auto'
 #s.plot.xlim=(-1,1)
 s.plot.ylim='auto'
 #s.plot.ylim=[(-1,1),(-1,1),(-1,1)]
-s.plot.xtype='time_us'
+s.plot.xtype='time_ms'
 s.plot.tolerance=0.2
 s.plot.refresh_ylim=1
